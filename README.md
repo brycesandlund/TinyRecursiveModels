@@ -63,6 +63,23 @@ python dataset/build_maze_dataset.py # 1000 examples, 8 augments
 
 ### Sudoku-Extreme (assuming 1 L40S GPU):
 
+**Quick test run (MPS/CPU compatible):**
+
+```bash
+python pretrain.py arch=trm \
+  'data_paths=[data/sudoku-extreme-1k-aug-1000]' \
+  'evaluators=[]' \
+  epochs=1 eval_interval=1 \
+  lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
+  arch.mlp_t=True arch.pos_encodings=none \
+  arch.L_layers=1 arch.H_cycles=2 arch.L_cycles=3 \
+  '+run_name=test_mlp_t_sudoku' ema=False \
+  global_batch_size=128 '+max_eval_groups=10' \
+  2>&1 | tee outputs/test.log
+```
+
+**Full training run:**
+
 ```bash
 run_name="pretrain_mlp_t_sudoku"
 python pretrain.py \
