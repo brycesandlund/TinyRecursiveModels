@@ -1,0 +1,20 @@
+# Wandb
+wandb/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Data and checkpoints
+data/
+checkpoints/
+outputs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

@@ -17,12 +17,24 @@ import coolname
 import hydra
 import pydantic
 from omegaconf import DictConfig
-from adam_atan2 import AdamATan2
+try:
+    from adam_atan2 import AdamATan2
+except ImportError:
+    from adam_atan2_pytorch import AdamAtan2 as AdamATan2
 
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
 from utils.functions import load_model_class, get_model_source_path
 from models.sparse_embedding import CastedSparseEmbeddingSignSGD_Distributed
 from models.ema import EMAHelper
+
+# Device detection: CUDA > MPS > CPU
+if torch.cuda.is_available():
+    DEVICE = "cuda"
+elif torch.backends.mps.is_available():
+    DEVICE = "mps"
+else:
+    DEVICE = "cpu"
+print(f"Using device: {DEVICE}")
 
 
 class LossConfig(pydantic.BaseModel):
@@ -78,6 +90,7 @@ class PretrainConfig(pydantic.BaseModel):
     eval_interval: Optional[int] = None
     min_eval_interval: Optional[int] = 0 # when to start eval
     eval_save_outputs: List[str] = []
+    max_eval_groups: Optional[int] = None  # Limit eval groups for dev testing
 
     ema: bool = False # use Exponential-Moving-Average
     ema_rate: float = 0.999 # EMA-rate
@@ -95,11 +108,13 @@ class TrainState:
 
 
 def create_dataloader(config: PretrainConfig, split: str, rank: int, world_size: int, **kwargs):
+    max_groups = config.max_eval_groups if split == "test" else None
     dataset = PuzzleDataset(PuzzleDatasetConfig(
         seed=config.seed,
         dataset_paths=config.data_paths_test if len(config.data_paths_test)>0 and split=="test" else config.data_paths,
         rank=rank,
         num_replicas=world_size,
+        max_groups=max_groups,
         **kwargs
     ), split=split)
     dataloader = DataLoader(
@@ -127,12 +142,14 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
     model_cls = load_model_class(config.arch.name)
     loss_head_cls = load_model_class(config.arch.loss.name)
 
-    with torch.device("cuda"):
+    with torch.device(DEVICE):
         model: nn.Module = model_cls(model_cfg)
         print(model)
         model = loss_head_cls(model, **config.arch.loss.__pydantic_extra__)  # type: ignore
-        if "DISABLE_COMPILE" not in os.environ:
+        if "DISABLE_COMPILE" not in os.environ and DEVICE != "mps":
             model = torch.compile(model)  # type: ignore
+        elif DEVICE == "mps":
+            print("Skipping torch.compile on MPS (float64 not supported)")
 
         # Load checkpoint
         if rank == 0:
@@ -149,7 +166,7 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
         optimizers = [
             AdamATan2(
                 model.parameters(),
-                lr=0,  # Needs to be set by scheduler
+                lr=1e-10,  # Needs to be set by scheduler (non-zero for adam_atan2_pytorch compatibility)
                 weight_decay=config.weight_decay,
                 betas=(config.beta1, config.beta2)
             )
@@ -179,7 +196,7 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
             ),
             AdamATan2(
                 model.parameters(),
-                lr=0,  # Needs to be set by scheduler
+                lr=1e-10,  # Needs to be set by scheduler (non-zero for adam_atan2_pytorch compatibility)
                 weight_decay=config.weight_decay,
                 betas=(config.beta1, config.beta2)
             )
@@ -246,7 +263,7 @@ def load_checkpoint(model: nn.Module, config: PretrainConfig):
         print(f"Loading checkpoint {config.load_checkpoint}")
 
         # Load state dict
-        state_dict = torch.load(config.load_checkpoint, map_location="cuda")
+        state_dict = torch.load(config.load_checkpoint, map_location=DEVICE)
 
         # Resize and reset puzzle emb if needed
         puzzle_emb_name = "_orig_mod.model.inner.puzzle_emb.weights"
@@ -292,11 +309,11 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
         return
 
     # To device
-    batch = {k: v.cuda() for k, v in batch.items()}
+    batch = {k: v.to(DEVICE) for k, v in batch.items()}
 
     # Init carry if it is None
     if train_state.carry is None:
-        with torch.device("cuda"):
+        with torch.device(DEVICE):
             train_state.carry = train_state.model.initial_carry(batch)  # type: ignore
 
     # Forward
@@ -377,8 +394,8 @@ def evaluate(
                 print(f"Processing batch {processed_batches}: {set_name}")
             
             # To device
-            batch = {k: v.cuda() for k, v in batch.items()}
-            with torch.device("cuda"):
+            batch = {k: v.to(DEVICE) for k, v in batch.items()}
+            with torch.device(DEVICE):
                 carry = train_state.model.initial_carry(batch)  # type: ignore
 
             # Forward
@@ -414,7 +431,7 @@ def evaluate(
                     sorted(metrics.keys())
                 )  # Sort keys to guarantee all processes use the same order.
                 metric_values = torch.zeros(
-                    (len(set_ids), len(metrics.values())), dtype=torch.float32, device="cuda"
+                    (len(set_ids), len(metrics.values())), dtype=torch.float32, device=DEVICE
                 )
 
             metric_values[set_id] += torch.stack([metrics[k] for k in metric_keys])
@@ -546,7 +563,8 @@ def launch(hydra_config: DictConfig):
         RANK = dist.get_rank()
         WORLD_SIZE = dist.get_world_size()
 
-        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        if DEVICE == "cuda":
+            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
         
         # CPU GLOO process group
         CPU_PROCESS_GROUP = dist.new_group(backend="gloo")

@@ -48,6 +48,7 @@ class PuzzleDatasetConfig(pydantic.BaseModel):
     epochs_per_iter: int  # Batch X epochs in an iteration to reduce overhead.
     rank: int
     num_replicas: int
+    max_groups: Optional[int] = None  # Limit groups for dev testing
 
 class PuzzleDataset(IterableDataset):
     def __init__(self, config: PuzzleDatasetConfig, split: str = "train"):
@@ -168,6 +169,10 @@ class PuzzleDataset(IterableDataset):
     def _iter_test(self):
         for set_i, (set_name, dataset) in enumerate(self._data.items()):  # type: ignore
             total_examples = len(dataset["inputs"])
+
+            # Limit examples if max_groups is set
+            if self.config.max_groups is not None:
+                total_examples = min(total_examples, self.config.max_groups * self.config.global_batch_size)
 
             # Load examples one by one
             start_index = 0
