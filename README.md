@@ -73,6 +73,7 @@ python pretrain.py arch=trm \
   lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
   arch.mlp_t=True arch.pos_encodings=none \
   arch.L_layers=1 arch.H_cycles=2 arch.L_cycles=3 \
+  '+arch.halt_max_steps_eval=32' \
   '+run_name=test_mlp_t_sudoku' ema=False \
   global_batch_size=128 '+max_eval_groups=10' \
   2>&1 | tee outputs/test.log
