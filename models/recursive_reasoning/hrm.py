@@ -50,6 +50,7 @@ class HierarchicalReasoningModel_ACTV1Config(BaseModel):
     
     # Halting Q-learning config
     halt_max_steps: int
+    halt_max_steps_eval: Optional[int] = None  # If set, use this for eval instead of halt_max_steps
     halt_exploration_prob: float
 
     forward_dtype: str = "bfloat16"
@@ -268,8 +269,9 @@ class HierarchicalReasoningModel_ACTV1(nn.Module):
         with torch.no_grad():
             # Step
             new_steps = new_steps + 1
-            is_last_step = new_steps >= self.config.halt_max_steps
-            
+            max_steps = self.config.halt_max_steps if self.training or self.config.halt_max_steps_eval is None else self.config.halt_max_steps_eval
+            is_last_step = new_steps >= max_steps
+
             halted = is_last_step
 
             # if training, and ACT is enabled
