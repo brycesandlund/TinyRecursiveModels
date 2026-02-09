@@ -22,3 +22,4 @@ pos_encodings: rope
 forward_dtype: bfloat16
 
 mlp_t: False # use mlp on L instead of transformer
+halt_on_correct: False # If True, halt training only when output matches labels

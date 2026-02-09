@@ -353,8 +353,14 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             reduced_metrics = {k: metric_values[i] for i, k in enumerate(metric_keys)}
             
             # Postprocess
+            no_halted = reduced_metrics["count"] == 0
             count = max(reduced_metrics["count"], 1)  # Avoid NaNs
             reduced_metrics = {f"train/{k}": v / (global_batch_size if k.endswith("loss") else count) for k, v in reduced_metrics.items()}
+            if no_halted:
+                # No halted examples, so don't log these
+                reduced_metrics.pop("train/steps", None)
+                reduced_metrics.pop("train/q_halt_accuracy", None)
+                reduced_metrics.pop("train/hit_max_steps", None)
 
             reduced_metrics["train/lr"] = lr_this_step
             return reduced_metrics

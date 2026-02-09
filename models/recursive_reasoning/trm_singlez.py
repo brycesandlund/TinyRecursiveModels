@@ -62,6 +62,7 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     mlp_t: bool = False # use mlp on L instead of transformer
     puzzle_emb_len: int = 16 # if non-zero, its specified to this value
     no_ACT_continue: bool =  True # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
+    halt_on_correct: bool = False # If True, halt training only when output matches labels
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -269,6 +270,7 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
             is_last_step = new_steps >= max_steps
 
             halted = is_last_step
+            outputs["is_last_step"] = is_last_step
 
             # if training, and ACT is enabled
             if self.training and (self.config.halt_max_steps > 1):
@@ -276,7 +278,12 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                 # Halt signal
                 # NOTE: During evaluation, always use max steps, this is to guarantee the same halting steps inside a batch for batching purposes
                 
-                if self.config.no_ACT_continue:
+                if self.config.halt_on_correct:
+                    preds = logits.argmax(-1)
+                    labels = new_current_data["labels"]
+                    correct = ((preds == labels) | (labels == IGNORE_LABEL_ID)).all(dim=-1)
+                    halted = halted | correct
+                elif self.config.no_ACT_continue:
                     halted = halted | (q_halt_logits > 0)
                 else:
                     halted = halted | (q_halt_logits > q_continue_logits)

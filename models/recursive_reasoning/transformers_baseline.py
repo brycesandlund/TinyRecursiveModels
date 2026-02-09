@@ -26,6 +26,8 @@ from models.common import trunc_normal_init_
 from models.layers import rms_norm, SwiGLU, Attention, RotaryEmbedding, CosSin, CastedEmbedding, CastedLinear
 from models.sparse_embedding import CastedSparseEmbedding
 
+IGNORE_LABEL_ID = -100
+
 
 @dataclass
 class Model_ACTV2InnerCarry:
@@ -68,6 +70,7 @@ class Model_ACTV2Config(BaseModel):
     halt_exploration_prob: float
     act_enabled: bool = True  # If False, always run halt_max_steps (no early stopping during training)
     act_inference: bool = False  # If True, use adaptive computation during inference
+    halt_on_correct: bool = False # If True, halt training only when output matches labels
 
     forward_dtype: str = "bfloat16"
 
@@ -299,6 +302,7 @@ class Model_ACTV2(nn.Module):
             is_last_step = new_steps >= max_steps
 
             halted = is_last_step
+            outputs["is_last_step"] = is_last_step
 
             # Check if adaptive computation should be used
             use_adaptive = (self.config.halt_max_steps > 1) and (
@@ -306,7 +310,12 @@ class Model_ACTV2(nn.Module):
                 or (not self.training and self.config.act_inference)
             )
 
-            if use_adaptive:
+            if self.config.halt_on_correct and self.training:
+                preds = logits.argmax(-1)
+                labels = new_current_data["labels"]
+                correct = ((preds == labels) | (labels == IGNORE_LABEL_ID)).all(dim=-1)
+                halted = halted | correct
+            elif use_adaptive:
                 # Halt signal based on Q-values (but always halt at max steps)
                 q_halt_signal = q_halt_logits > q_continue_logits
                 halted = halted | q_halt_signal

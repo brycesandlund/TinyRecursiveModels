@@ -10,6 +10,8 @@ from models.common import trunc_normal_init_
 from models.layers import rms_norm, SwiGLU, Attention, RotaryEmbedding, CosSin, CastedEmbedding, CastedLinear
 from models.sparse_embedding import CastedSparseEmbedding
 
+IGNORE_LABEL_ID = -100
+
 @dataclass
 class HierarchicalReasoningModel_ACTV1InnerCarry:
     z_H: torch.Tensor
@@ -57,6 +59,7 @@ class HierarchicalReasoningModel_ACTV1Config(BaseModel):
 
     # Alexia: added
     mlp_t: bool=False # use mlp on L instead of transformer
+    halt_on_correct: bool = False # If True, halt training only when output matches labels
 
 class HierarchicalReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: HierarchicalReasoningModel_ACTV1Config) -> None:
@@ -273,12 +276,19 @@ class HierarchicalReasoningModel_ACTV1(nn.Module):
             is_last_step = new_steps >= max_steps
 
             halted = is_last_step
+            outputs["is_last_step"] = is_last_step
 
             # if training, and ACT is enabled
             if self.training and (self.config.halt_max_steps > 1):
                 # Halt signal
                 # NOTE: During evaluation, always use max steps, this is to guarantee the same halting steps inside a batch for batching purposes
-                halted = halted | (q_halt_logits > q_continue_logits)
+                if self.config.halt_on_correct:
+                    preds = logits.argmax(-1)
+                    labels = new_current_data["labels"]
+                    correct = ((preds == labels) | (labels == IGNORE_LABEL_ID)).all(dim=-1)
+                    halted = halted | correct
+                else:
+                    halted = halted | (q_halt_logits > q_continue_logits)
 
                 # Exploration
                 min_halt_steps = (torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob) * torch.randint_like(new_steps, low=2, high=self.config.halt_max_steps + 1)
