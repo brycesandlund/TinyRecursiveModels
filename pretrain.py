@@ -5,6 +5,7 @@ import math
 import yaml
 import shutil
 import copy
+import time
 
 import torch
 import torch.distributed as dist
@@ -648,16 +649,21 @@ def launch(hydra_config: DictConfig):
             else:
                 train_state_eval = train_state
             train_state_eval.model.eval()
-            metrics = evaluate(config, 
-                train_state_eval, 
-                eval_loader, 
-                eval_metadata, 
+            eval_start_time = time.time()
+            metrics = evaluate(config,
+                train_state_eval,
+                eval_loader,
+                eval_metadata,
                 evaluators,
-                rank=RANK, 
+                rank=RANK,
                 world_size=WORLD_SIZE,
                 cpu_group=CPU_PROCESS_GROUP)
 
-            if RANK == 0 and metrics is not None:
+            if RANK == 0:
+                eval_time = time.time() - eval_start_time
+                if metrics is None:
+                    metrics = {}
+                metrics["eval/time_seconds"] = eval_time
                 wandb.log(metrics, step=train_state.step)
                 
             ############ Checkpointing
