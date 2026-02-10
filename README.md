@@ -33,6 +33,16 @@ pip install --no-cache-dir --no-build-isolation adam-atan2
 wandb login YOUR-LOGIN # login if you want the logger to sync results to your Weights & Biases (https://wandb.ai/)
 ```
 
+### Added Configurations
+
+The following configurations have been added since forking the original repo. They can be passed as command-line overrides (e.g., `arch.halt_on_correct=True` or `+arch.halt_max_steps_eval=32`):
+
+| Config | Default | Description |
+|--------|---------|-------------|
+| `arch.halt_max_steps_eval` | `None` | If set, use a different max steps for evaluation/inference than `halt_max_steps`. Useful for allowing more reasoning steps at eval time. Requires `+` prefix since it's not in the base config. |
+| `arch.halt_on_correct` | `False` | Halt training when model predictions match labels (oracle signal) instead of using the learned q_halt signal. |
+| `arch.eval_on_q` | `False` | Use ACT-based q_halt halting during evaluation. By default, evaluation always runs to max steps. |
+
 ### Dataset Preparation
 
 ```bash

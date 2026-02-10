@@ -63,6 +63,7 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     puzzle_emb_len: int = 16 # if non-zero, its specified to this value
     no_ACT_continue: bool =  True # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
     halt_on_correct: bool = False # If True, halt training only when output matches labels
+    eval_on_q: bool = False # If True, use ACT-based halting for evaluation
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -276,12 +277,10 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
             outputs["is_last_step"] = is_last_step
 
             # if training, and ACT is enabled
-            if self.training and (self.config.halt_max_steps > 1):
+            if (self.training or self.config.eval_on_q) and (self.config.halt_max_steps > 1):
 
                 # Halt signal
-                # NOTE: During evaluation, always use max steps, this is to guarantee the same halting steps inside a batch for batching purposes
-                
-                if self.config.halt_on_correct:
+                if self.config.halt_on_correct and self.training:
                     preds = logits.argmax(-1)
                     labels = new_current_data["labels"]
                     correct = ((preds == labels) | (labels == IGNORE_LABEL_ID)).all(dim=-1)
@@ -291,9 +290,10 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                 else:
                     halted = halted | (q_halt_logits > q_continue_logits)
 
-                # Exploration
-                min_halt_steps = (torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob) * torch.randint_like(new_steps, low=2, high=self.config.halt_max_steps + 1)
-                halted = halted & (new_steps >= min_halt_steps)
+                # Exploration (training only)
+                if self.training:
+                    min_halt_steps = (torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob) * torch.randint_like(new_steps, low=2, high=self.config.halt_max_steps + 1)
+                    halted = halted & (new_steps >= min_halt_steps)
 
                 if not self.config.no_ACT_continue:
                     # Compute target Q

@@ -360,7 +360,7 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             reduced_metrics = {f"train/{k}": v / (global_batch_size if k.endswith("loss") else count) for k, v in reduced_metrics.items()}
             if no_halted:
                 # No halted examples, so don't log these
-                for k in ["train/steps", "train/q_halt_accuracy", "train/hit_max_steps", "train/accuracy", "train/exact_accuracy"]:                                                                                 
+                for k in ["train/steps", "train/q_halt_accuracy", "train/q_halt_false_positive", "train/hit_max_steps", "train/accuracy", "train/exact_accuracy"]:                                                                                 
                    reduced_metrics.pop(k, None)
 
             reduced_metrics["train/count"] = original_count
@@ -630,9 +630,11 @@ def launch(hydra_config: DictConfig):
             print("TRAIN")
         train_state.model.train()
         for set_name, batch, global_batch_size in train_loader:
+            step_start_time = time.time()
             metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE)
 
             if RANK == 0 and metrics is not None:
+                metrics["train/time_seconds"] = time.time() - step_start_time
                 wandb.log(metrics, step=train_state.step)
                 progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
             if config.ema:
