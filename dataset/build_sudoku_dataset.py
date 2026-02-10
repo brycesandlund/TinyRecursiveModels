@@ -81,50 +81,49 @@ def convert_subset(set_name: str, config: DataProcessConfig):
             inputs = [inputs[i] for i in indices]
             labels = [labels[i] for i in indices]
 
+    # Convert to contiguous arrays and free per-element object overhead
+    inputs = np.array(inputs)   # (N, 9, 9) uint8
+    labels = np.array(labels)   # (N, 9, 9) uint8
+    N = len(inputs)
+
     # Generate dataset
     num_augments = config.num_aug if set_name == "train" else 0
+    total_examples = N * (1 + num_augments)
 
-    results = {k: [] for k in ["inputs", "labels", "puzzle_identifiers", "puzzle_indices", "group_indices"]}
-    puzzle_id = 0
-    example_id = 0
-    
-    results["puzzle_indices"].append(0)
-    results["group_indices"].append(0)
-    
-    for orig_inp, orig_out in zip(tqdm(inputs), labels):
+    # Pre-allocate output arrays instead of accumulating millions of small arrays
+    all_inputs = np.empty((total_examples, 81), dtype=np.uint8)
+    all_labels = np.empty((total_examples, 81), dtype=np.uint8)
+
+    idx = 0
+    for i in tqdm(range(N)):
+        orig_inp = inputs[i]
+        orig_out = labels[i]
         for aug_idx in range(1 + num_augments):
             # First index is not augmented
             if aug_idx == 0:
                 inp, out = orig_inp, orig_out
             else:
                 inp, out = shuffle_sudoku(orig_inp, orig_out)
+            all_inputs[idx] = inp.flatten()
+            all_labels[idx] = out.flatten()
+            idx += 1
 
-            # Push puzzle (only single example)
-            results["inputs"].append(inp)
-            results["labels"].append(out)
-            example_id += 1
-            puzzle_id += 1
-            
-            results["puzzle_indices"].append(example_id)
-            results["puzzle_identifiers"].append(0)
-            
-        # Push group
-        results["group_indices"].append(puzzle_id)
-        
-    # To Numpy
-    def _seq_to_numpy(seq):
-        arr = np.concatenate(seq).reshape(len(seq), -1)
-        
-        assert np.all((arr >= 0) & (arr <= 9))
-        return arr + 1
-    
+    assert np.all((all_inputs >= 0) & (all_inputs <= 9))
+    assert np.all((all_labels >= 0) & (all_labels <= 9))
+    all_inputs += 1
+    all_labels += 1
+
+    # Compute index arrays analytically
+    puzzle_indices = np.arange(total_examples + 1, dtype=np.int32)
+    puzzle_identifiers = np.zeros(total_examples, dtype=np.int32)
+    group_indices = np.arange(N + 1, dtype=np.int32) * (1 + num_augments)
+
     results = {
-        "inputs": _seq_to_numpy(results["inputs"]),
-        "labels": _seq_to_numpy(results["labels"]),
-        
-        "group_indices": np.array(results["group_indices"], dtype=np.int32),
-        "puzzle_indices": np.array(results["puzzle_indices"], dtype=np.int32),
-        "puzzle_identifiers": np.array(results["puzzle_identifiers"], dtype=np.int32),
+        "inputs": all_inputs,
+        "labels": all_labels,
+        "group_indices": group_indices,
+        "puzzle_indices": puzzle_indices,
+        "puzzle_identifiers": puzzle_identifiers,
     }
 
     # Metadata
