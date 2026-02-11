@@ -60,6 +60,7 @@ class HierarchicalReasoningModel_ACTV1Config(BaseModel):
     # Alexia: added
     mlp_t: bool=False # use mlp on L instead of transformer
     halt_on_correct: bool = False # If True, halt training only when output matches labels
+    halt_on_correct_and_predicted: bool = False # If True, halt when correct AND q_head predicts halt
 
 class HierarchicalReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: HierarchicalReasoningModel_ACTV1Config) -> None:
@@ -282,11 +283,14 @@ class HierarchicalReasoningModel_ACTV1(nn.Module):
             if self.training and (self.config.halt_max_steps > 1):
                 # Halt signal
                 # NOTE: During evaluation, always use max steps, this is to guarantee the same halting steps inside a batch for batching purposes
-                if self.config.halt_on_correct:
+                if self.config.halt_on_correct_and_predicted or self.config.halt_on_correct:
                     preds = logits.argmax(-1)
                     labels = new_current_data["labels"]
                     correct = ((preds == labels) | (labels == IGNORE_LABEL_ID)).all(dim=-1)
-                    halted = halted | correct
+                    if self.config.halt_on_correct_and_predicted:
+                        halted = halted | (correct & (q_halt_logits >= 0))
+                    else:
+                        halted = halted | correct
                 else:
                     halted = halted | (q_halt_logits > q_continue_logits)
 

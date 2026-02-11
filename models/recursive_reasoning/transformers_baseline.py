@@ -71,6 +71,7 @@ class Model_ACTV2Config(BaseModel):
     act_enabled: bool = True  # If False, always run halt_max_steps (no early stopping during training)
     act_inference: bool = False  # If True, use adaptive computation during inference
     halt_on_correct: bool = False # If True, halt training only when output matches labels
+    halt_on_correct_and_predicted: bool = False # If True, halt when correct AND q_head predicts halt
 
     forward_dtype: str = "bfloat16"
 
@@ -310,11 +311,14 @@ class Model_ACTV2(nn.Module):
                 or (not self.training and self.config.act_inference)
             )
 
-            if self.config.halt_on_correct and self.training:
+            if (self.config.halt_on_correct_and_predicted or self.config.halt_on_correct) and self.training:
                 preds = logits.argmax(-1)
                 labels = new_current_data["labels"]
                 correct = ((preds == labels) | (labels == IGNORE_LABEL_ID)).all(dim=-1)
-                halted = halted | correct
+                if self.config.halt_on_correct_and_predicted:
+                    halted = halted | (correct & (q_halt_logits >= 0))
+                else:
+                    halted = halted | correct
             elif use_adaptive:
                 # Halt signal based on Q-values (but always halt at max steps)
                 q_halt_signal = q_halt_logits > q_continue_logits

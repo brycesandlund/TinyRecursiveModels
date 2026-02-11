@@ -41,6 +41,7 @@ The following configurations have been added since forking the original repo. Th
 |--------|---------|-------------|
 | `arch.halt_max_steps_eval` | `None` | If set, use a different max steps for evaluation/inference than `halt_max_steps`. Useful for allowing more reasoning steps at eval time. Requires `+` prefix since it's not in the base config. |
 | `arch.halt_on_correct` | `False` | Halt training when model predictions match labels (oracle signal) instead of using the learned q_halt signal. |
+| `arch.halt_on_correct_and_predicted` | `False` | Halt training only when predictions match labels AND the q_head predicts halt (`q_halt_logits >= 0`). Trains the model to stop only when it both gets the right answer and knows it. |
 | `arch.eval_on_q` | `False` | Use ACT-based q_halt halting during evaluation. By default, evaluation always runs to max steps. |
 
 ### Dataset Preparation

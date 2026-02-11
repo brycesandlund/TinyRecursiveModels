@@ -17,3 +17,4 @@ puzzle_emb_ndim: ${.hidden_size}
 
 pos_encodings: rope
 halt_on_correct: False # If True, halt training only when output matches labels
+halt_on_correct_and_predicted: False # If True, halt when correct AND q_head predicts halt
