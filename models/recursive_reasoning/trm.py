@@ -64,6 +64,8 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     no_ACT_continue: bool =  True # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
     halt_on_correct: bool = False # If True, halt training only when output matches labels
     halt_on_correct_and_predicted: bool = False # If True, halt when correct AND q_head predicts halt
+    halt_train_threshold: float = 0.5 # Halt training if probability of a correct solution is above this threshold
+    halt_eval_threshold: float = 0.5 # Halt evaluation if probability of a correct solution is above this threshold
     eval_on_q: bool = False # If True, use ACT-based halting for evaluation
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
@@ -279,6 +281,8 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
 
             # if training, and ACT is enabled
             if (self.training or self.config.eval_on_q) and (self.config.halt_max_steps > 1):
+                halt_threshold = self.config.halt_train_threshold if self.training else self.config.halt_eval_threshold
+                q_halt_prob = torch.sigmoid(q_halt_logits)
 
                 # Halt signal
                 if (self.config.halt_on_correct_and_predicted or self.config.halt_on_correct) and self.training:
@@ -286,11 +290,11 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                     labels = new_current_data["labels"]
                     correct = ((preds == labels) | (labels == IGNORE_LABEL_ID)).all(dim=-1)
                     if self.config.halt_on_correct_and_predicted:
-                        halted = halted | (correct & (q_halt_logits >= 0))
+                        halted = halted | (correct & (q_halt_prob >= halt_threshold))
                     else:
                         halted = halted | correct
                 elif self.config.no_ACT_continue:
-                    halted = halted | (q_halt_logits > 0)
+                    halted = halted | (q_halt_prob >= halt_threshold)
                 else:
                     halted = halted | (q_halt_logits > q_continue_logits)
 

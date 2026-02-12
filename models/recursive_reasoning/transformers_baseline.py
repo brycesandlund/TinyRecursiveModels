@@ -72,6 +72,8 @@ class Model_ACTV2Config(BaseModel):
     act_inference: bool = False  # If True, use adaptive computation during inference
     halt_on_correct: bool = False # If True, halt training only when output matches labels
     halt_on_correct_and_predicted: bool = False # If True, halt when correct AND q_head predicts halt
+    halt_train_threshold: float = 0.5 # Halt training if probability of a correct solution is above this threshold
+    halt_eval_threshold: float = 0.5 # Halt evaluation if probability of a correct solution is above this threshold
 
     forward_dtype: str = "bfloat16"
 
@@ -311,12 +313,15 @@ class Model_ACTV2(nn.Module):
                 or (not self.training and self.config.act_inference)
             )
 
+            halt_threshold = self.config.halt_train_threshold if self.training else self.config.halt_eval_threshold
+            q_halt_prob = torch.sigmoid(q_halt_logits)
+
             if (self.config.halt_on_correct_and_predicted or self.config.halt_on_correct) and self.training:
                 preds = logits.argmax(-1)
                 labels = new_current_data["labels"]
                 correct = ((preds == labels) | (labels == IGNORE_LABEL_ID)).all(dim=-1)
                 if self.config.halt_on_correct_and_predicted:
-                    halted = halted | (correct & (q_halt_logits >= 0))
+                    halted = halted | (correct & (q_halt_prob >= halt_threshold))
                 else:
                     halted = halted | correct
             elif use_adaptive:

@@ -106,6 +106,7 @@ class TrainState:
 
     step: int
     total_steps: int
+    cumulative_count: int = 0
 
 
 def create_dataloader(config: PretrainConfig, split: str, rank: int, world_size: int, **kwargs):
@@ -364,6 +365,8 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
                    reduced_metrics.pop(k, None)
 
             reduced_metrics["train/count"] = original_count
+            train_state.cumulative_count += int(original_count)
+            reduced_metrics["train/cumulative_count"] = train_state.cumulative_count
             reduced_metrics["train/lr"] = lr_this_step
             return reduced_metrics
 
