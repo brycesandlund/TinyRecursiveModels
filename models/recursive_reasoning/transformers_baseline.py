@@ -236,8 +236,10 @@ class Model_ACTV2_Inner(nn.Module):
         # Input encoding
         input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
 
-        # 1-step grad
-        z_H = self.H_level(carry.z_H, input_embeddings, **seq_info)
+        # H_cycles steps of grad
+        z_H = carry.z_H
+        for _ in range(self.config.H_cycles):
+            z_H = self.H_level(z_H, input_embeddings, **seq_info)
 
         # LM Outputs
         new_carry = Model_ACTV2InnerCarry(
