@@ -16,6 +16,7 @@ Architecture: Single-level transformer that processes the full 30x30 grid as a
 from typing import Tuple, List, Dict, Optional
 from dataclasses import dataclass
 import math
+import numpy as np
 
 import torch
 import torch.nn.functional as F
@@ -52,6 +53,7 @@ class Model_ACTV2Config(BaseModel):
     vocab_size: int
 
     H_cycles: int
+    grad_cycle_prob: float = 1.0
 
     H_layers: int
 
@@ -236,8 +238,14 @@ class Model_ACTV2_Inner(nn.Module):
         # Input encoding
         input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
 
-        # H_cycles steps of grad
+        # Random no_grad cycles followed by H_cycles grad steps
         z_H = carry.z_H
+        if self.config.grad_cycle_prob < 1.0:
+            n_no_grad = np.random.negative_binomial(self.config.H_cycles, self.config.grad_cycle_prob)
+            if n_no_grad > 0:
+                with torch.no_grad():
+                    for _ in range(n_no_grad):
+                        z_H = self.H_level(z_H, input_embeddings, **seq_info)
         for _ in range(self.config.H_cycles):
             z_H = self.H_level(z_H, input_embeddings, **seq_info)
 

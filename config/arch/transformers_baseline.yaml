@@ -6,7 +6,8 @@ loss:
 halt_exploration_prob: 0.1
 halt_max_steps: 16
 
-H_cycles: 1  # kept for compatibility
+H_cycles: 1
+grad_cycle_prob: 1.0  # probability that a cycle is a grad cycle; <1.0 prepends random no_grad cycles
 H_layers: 8 
 
 hidden_size: 512  
