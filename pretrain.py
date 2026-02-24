@@ -688,6 +688,44 @@ def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> 
     return objects[0]  # type: ignore
 
 
+def _run_eval(config, train_state, eval_loader, eval_metadata, evaluators,
+              ema_helper, is_last, rank=0, world_size=1, cpu_group=None):
+    if rank == 0:
+        print("EVALUATE")
+    if config.ema:
+        print("SWITCH TO EMA")
+        train_state_eval = copy.deepcopy(train_state)
+        train_state_eval.model = ema_helper.ema_copy(train_state_eval.model)
+    else:
+        train_state_eval = train_state
+    train_state_eval.model.eval()
+    eval_start_time = time.time()
+    metrics = evaluate(config,
+        train_state_eval,
+        eval_loader,
+        eval_metadata,
+        evaluators,
+        rank=rank,
+        world_size=world_size,
+        cpu_group=cpu_group)
+
+    if rank == 0:
+        eval_time = time.time() - eval_start_time
+        if metrics is None:
+            metrics = {}
+        metrics["eval/time_seconds"] = eval_time
+        wandb.log(metrics, step=train_state.step)
+
+    ############ Checkpointing
+    if rank == 0:
+        print("SAVE CHECKPOINT")
+    if rank == 0 and (config.checkpoint_every_eval or is_last):
+        save_train_state(config, train_state_eval)
+
+    if config.ema:
+        del train_state_eval
+
+
 @hydra.main(config_path="config", config_name="cfg_pretrain", version_base=None)
 def launch(hydra_config: DictConfig):
     RANK = 0
@@ -718,10 +756,13 @@ def launch(hydra_config: DictConfig):
     torch.random.manual_seed(config.seed + RANK)
 
     # Dataset
-    train_epochs_per_iter = config.eval_interval if config.eval_interval is not None else config.epochs
-    total_iters = config.epochs // train_epochs_per_iter
-
-    assert config.epochs % train_epochs_per_iter == 0, "Eval interval must be a divisor of total epochs."
+    if config.epochs > 0:
+        train_epochs_per_iter = config.eval_interval if config.eval_interval is not None else config.epochs
+        total_iters = config.epochs // train_epochs_per_iter
+        assert config.epochs % train_epochs_per_iter == 0, "Eval interval must be a divisor of total epochs."
+    else:
+        train_epochs_per_iter = 1
+        total_iters = 0
 
     train_loader, train_metadata = create_dataloader(config, "train", test_set_mode=False, epochs_per_iter=train_epochs_per_iter, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE)
     try:
@@ -765,40 +806,15 @@ def launch(hydra_config: DictConfig):
 
         if _iter_id >= config.min_eval_interval:
             ############ Evaluation
-            if RANK == 0:
-                print("EVALUATE")
-            if config.ema:
-                print("SWITCH TO EMA")
-                train_state_eval = copy.deepcopy(train_state)
-                train_state_eval.model = ema_helper.ema_copy(train_state_eval.model)
-            else:
-                train_state_eval = train_state
-            train_state_eval.model.eval()
-            eval_start_time = time.time()
-            metrics = evaluate(config,
-                train_state_eval,
-                eval_loader,
-                eval_metadata,
-                evaluators,
-                rank=RANK,
-                world_size=WORLD_SIZE,
-                cpu_group=CPU_PROCESS_GROUP)
+            _run_eval(config, train_state, eval_loader, eval_metadata, evaluators,
+                      ema_helper, _iter_id == total_iters - 1,
+                      rank=RANK, world_size=WORLD_SIZE, cpu_group=CPU_PROCESS_GROUP)
 
-            if RANK == 0:
-                eval_time = time.time() - eval_start_time
-                if metrics is None:
-                    metrics = {}
-                metrics["eval/time_seconds"] = eval_time
-                wandb.log(metrics, step=train_state.step)
-                
-            ############ Checkpointing
-            if RANK == 0:
-                print("SAVE CHECKPOINT")
-            if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
-                save_train_state(config, train_state_eval)
-
-            if config.ema:
-                del train_state_eval
+    # Eval-only run (epochs=0): skip training, just evaluate
+    if total_iters == 0:
+        _run_eval(config, train_state, eval_loader, eval_metadata, evaluators,
+                  ema_helper, is_last=True,
+                  rank=RANK, world_size=WORLD_SIZE, cpu_group=CPU_PROCESS_GROUP)
 
     # finalize
     if dist.is_initialized():
