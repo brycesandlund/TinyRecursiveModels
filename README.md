@@ -48,6 +48,7 @@ The following configurations have been added since forking the original repo. Th
 | `arch.act_enabled` | `True` | If `False`, always run `halt_max_steps` (no early stopping during training). |
 | `arch.act_inference` | `False` | If `True`, use adaptive computation during inference. |
 | `arch.no_ACT_continue` | `True` | No continue ACT loss — only use the sigmoid of the halt signal. |
+| `arch.explore_as_eval` | `False` | If `True`, explored samples (epsilon fraction) use the eval halting strategy during training instead of random min-step exploration. |
 
 ### Dataset Preparation
 

@@ -68,6 +68,7 @@ class Model_ACTV2Config(BaseModel):
     halt_train_threshold: float = 0.5 # Halt training if probability of a correct solution is above this threshold
     halt_eval_threshold: float = 0.5 # Halt evaluation if probability of a correct solution is above this threshold
     eval_on_q: bool = False # If True, use ACT-based halting for evaluation
+    explore_as_eval: bool = False # If True, explored samples use eval halting strategy
     no_ACT_continue: bool = True # No continue ACT loss, only use the sigmoid of the halt
 
     forward_dtype: str = "bfloat16"

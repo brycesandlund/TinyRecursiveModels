@@ -23,6 +23,7 @@ class ACTCarry:
     steps: torch.Tensor       # [batch_size] int32
     halted: torch.Tensor      # [batch_size] bool
     current_data: Dict[str, torch.Tensor]
+    use_eval_halting: torch.Tensor  # [batch_size] bool, persisted across steps
 
 
 class ACTWrapper(nn.Module):
@@ -46,6 +47,7 @@ class ACTWrapper(nn.Module):
                 k: v.unsqueeze(0).expand(batch_size, *v.shape).clone()
                 for k, v in sample_template.items()
             },
+            use_eval_halting=torch.zeros((batch_size,), dtype=torch.bool),
         )
 
     def forward(
@@ -76,13 +78,24 @@ class ACTWrapper(nn.Module):
         }
 
         with torch.no_grad():
-            # Step counting
             new_steps = new_steps + 1
-            halt_max_steps = self.config.halt_max_steps
-            if not self.training and self.config.halt_max_steps_eval is not None:
-                halt_max_steps = self.config.halt_max_steps_eval
-            is_last_step = new_steps >= halt_max_steps
+            device = new_steps.device
 
+            # Per-sample halting strategy (persisted in carry, refreshed for new samples)
+            if self.training and self.config.explore_as_eval:
+                new_rolls = torch.rand(new_steps.shape[0], device=device) < self.config.halt_exploration_prob
+                use_eval_halting = torch.where(carry.halted, new_rolls, carry.use_eval_halting)
+            elif not self.training:
+                use_eval_halting = torch.ones(new_steps.shape[0], dtype=torch.bool, device=device)
+            else:
+                use_eval_halting = torch.zeros(new_steps.shape[0], dtype=torch.bool, device=device)
+
+            # Derived per-sample parameters
+            eval_max_steps = self.config.halt_max_steps_eval if self.config.halt_max_steps_eval is not None else self.config.halt_max_steps
+            effective_max_steps = torch.where(use_eval_halting, eval_max_steps, self.config.halt_max_steps)
+            effective_threshold = torch.where(use_eval_halting, self.config.halt_eval_threshold, self.config.halt_train_threshold)
+
+            is_last_step = new_steps >= effective_max_steps
             halted = is_last_step
             outputs["is_last_step"] = is_last_step
 
@@ -98,10 +111,6 @@ class ACTWrapper(nn.Module):
             )
 
             if use_adaptive:
-                halt_threshold = (
-                    self.config.halt_train_threshold if self.training
-                    else self.config.halt_eval_threshold
-                )
                 q_halt_prob = torch.sigmoid(q_halt_logits)
 
                 # Halt signal
@@ -113,11 +122,17 @@ class ACTWrapper(nn.Module):
                     labels = new_current_data["labels"]
                     correct = ((preds == labels) | (labels == IGNORE_LABEL_ID)).all(dim=-1)
                     if halt_on_correct_and_predicted:
-                        halted = halted | (correct & (q_halt_prob >= halt_threshold))
+                        oracle_halt = correct & (q_halt_prob >= effective_threshold)
                     else:
-                        halted = halted | correct
+                        oracle_halt = correct
+                    # Eval-path explored samples use q-based halting, not oracle
+                    if no_ACT_continue:
+                        eval_halt = q_halt_prob >= effective_threshold
+                    else:
+                        eval_halt = q_halt_logits > q_continue_logits
+                    halted = halted | torch.where(use_eval_halting, eval_halt, oracle_halt)
                 elif no_ACT_continue:
-                    halted = halted | (q_halt_prob >= halt_threshold)
+                    halted = halted | (q_halt_prob >= effective_threshold)
                 else:
                     q_halt_signal = q_halt_logits > q_continue_logits
                     halted = halted | q_halt_signal
@@ -126,8 +141,9 @@ class ACTWrapper(nn.Module):
                 if not self.training:
                     outputs["actual_steps"] = new_steps.float()
 
-                # Exploration (training only)
-                if self.training:
+                # Exploration (training only, when NOT using explore_as_eval)
+                # NOTE: re-rolls every forward pass, so exploration is weaker than intended.
+                if self.training and not self.config.explore_as_eval:
                     min_halt_steps = (
                         torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob
                     ) * torch.randint_like(new_steps, low=2, high=self.config.halt_max_steps + 1)
@@ -146,4 +162,4 @@ class ACTWrapper(nn.Module):
                         )
                     )
 
-        return ACTCarry(new_inner_carry, new_steps, halted, new_current_data), outputs
+        return ACTCarry(new_inner_carry, new_steps, halted, new_current_data, use_eval_halting), outputs

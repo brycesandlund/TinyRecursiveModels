@@ -31,3 +31,4 @@ halt_on_correct: False # If True, halt training only when output matches labels
 halt_on_correct_and_predicted: False # If True, halt when correct AND q_head predicts halt
 halt_train_threshold: 0.5 # Halt training if probability of a correct solution is above this threshold
 halt_eval_threshold: 0.5 # Halt evaluation if probability of a correct solution is above this threshold
+explore_as_eval: False # If True, explored samples use eval halting strategy
