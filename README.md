@@ -44,7 +44,10 @@ The following configurations have been added since forking the original repo. Th
 | `arch.halt_on_correct_and_predicted` | `False` | Halt training only when predictions match labels AND the q_head predicts halt. Trains the model to stop only when it both gets the right answer and knows it. |
 | `arch.halt_train_threshold` | `0.5` | Halt training if probability of a correct solution is above this threshold. |
 | `arch.halt_eval_threshold` | `0.5` | Halt evaluation if probability of a correct solution is above this threshold. |
-| `arch.eval_on_q` | `False` | **BROKEN — do not use.** Intended to enable ACT-based q_halt halting during evaluation, but causes an infinite loop because examples halt at different steps and the carry mechanism recycles halted examples (resetting their steps to 0), so the batch never reaches `all_finish` simultaneously. |
+| `arch.eval_on_q` | `False` | Enable ACT-based q_halt halting during evaluation. Samples halt adaptively and are replaced from the eval queue. |
+| `arch.act_enabled` | `True` | If `False`, always run `halt_max_steps` (no early stopping during training). |
+| `arch.act_inference` | `False` | If `True`, use adaptive computation during inference. |
+| `arch.no_ACT_continue` | `True` | No continue ACT loss — only use the sigmoid of the halt signal. |
 
 ### Dataset Preparation
 

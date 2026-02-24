@@ -46,8 +46,8 @@ class ACTLossHead(nn.Module):
         self.model = model
         self.loss_fn = globals()[loss_type]
         
-    def initial_carry(self, *args, **kwargs):
-        return self.model.initial_carry(*args, **kwargs)  # type: ignore
+    def initial_carry(self, batch_size, sample_template):
+        return self.model.initial_carry(batch_size, sample_template)  # type: ignore
 
     def forward(
         self,
@@ -89,7 +89,8 @@ class ACTLossHead(nn.Module):
         # Losses
 
         lm_loss = (self.loss_fn(outputs["logits"], labels, ignore_index=IGNORE_LABEL_ID, valid_mask=mask) / loss_divisor).sum()
-        q_halt_loss = F.binary_cross_entropy_with_logits(outputs["q_halt_logits"], seq_is_correct.to(outputs["q_halt_logits"].dtype), reduction="sum")
+        q_halt_loss = F.binary_cross_entropy_with_logits(outputs["q_halt_logits"], seq_is_correct.to(outputs["q_halt_logits"].dtype), reduction="none")
+        q_halt_loss = torch.where(loss_counts > 0, q_halt_loss, 0).sum()
         metrics.update({
             "lm_loss": lm_loss.detach(),
             "q_halt_loss": q_halt_loss.detach(),

@@ -17,6 +17,10 @@ expansion: 4
 puzzle_emb_ndim: ${.hidden_size}
 
 pos_encodings: rope
+no_ACT_continue: True # No continue ACT loss, only use the sigmoid of the halt
+act_enabled: True # If False, always run halt_max_steps (no early stopping during training)
+act_inference: False # If True, use adaptive computation during inference
+eval_on_q: False # If True, use ACT-based halting for evaluation
 halt_on_correct: False # If True, halt training only when output matches labels
 halt_on_correct_and_predicted: False # If True, halt when correct AND q_head predicts halt
 halt_train_threshold: 0.5 # Halt training if probability of a correct solution is above this threshold

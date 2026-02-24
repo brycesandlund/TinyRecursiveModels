@@ -35,15 +35,6 @@ class Model_ACTV2InnerCarry:
     z_H: torch.Tensor
 
 
-@dataclass
-class Model_ACTV2Carry:
-    inner_carry: Model_ACTV2InnerCarry
-
-    steps: torch.Tensor
-    halted: torch.Tensor
-
-    current_data: Dict[str, torch.Tensor]
-
 
 class Model_ACTV2Config(BaseModel):
     batch_size: int
@@ -76,6 +67,8 @@ class Model_ACTV2Config(BaseModel):
     halt_on_correct_and_predicted: bool = False # If True, halt when correct AND q_head predicts halt
     halt_train_threshold: float = 0.5 # Halt training if probability of a correct solution is above this threshold
     halt_eval_threshold: float = 0.5 # Halt evaluation if probability of a correct solution is above this threshold
+    eval_on_q: bool = False # If True, use ACT-based halting for evaluation
+    no_ACT_continue: bool = True # No continue ACT loss, only use the sigmoid of the halt
 
     forward_dtype: str = "bfloat16"
 
@@ -261,112 +254,9 @@ class Model_ACTV2_Inner(nn.Module):
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
 
 
-class Model_ACTV2(nn.Module):
-    """ACT wrapper."""
-
-    def __init__(self, config_dict: dict):
-        super().__init__()
-        self.config = Model_ACTV2Config(**config_dict)
-        self.inner = Model_ACTV2_Inner(self.config)
-
-    @property
-    def puzzle_emb(self):
-        return self.inner.puzzle_emb
-
-    def initial_carry(self, batch: Dict[str, torch.Tensor]):
-        batch_size = batch["inputs"].shape[0]
-
-        return Model_ACTV2Carry(
-            inner_carry=self.inner.empty_carry(
-                batch_size
-            ),  # Empty is expected, it will be reseted in first pass as all sequences are halted.
-            steps=torch.zeros((batch_size,), dtype=torch.int32),
-            halted=torch.ones((batch_size,), dtype=torch.bool),  # Default to halted
-            current_data={k: torch.empty_like(v) for k, v in batch.items()},
-        )
-
-    def forward(
-        self,
-        carry: Model_ACTV2Carry,
-        batch: Dict[str, torch.Tensor],
-        compute_target_q: bool = False,
-    ) -> Tuple[Model_ACTV2Carry, Dict[str, torch.Tensor]]:
-        # Update data, carry (removing halted sequences)
-        new_inner_carry = self.inner.reset_carry(carry.halted, carry.inner_carry)
-
-        new_steps = torch.where(carry.halted, 0, carry.steps)
-
-        new_current_data = {
-            k: torch.where(carry.halted.view((-1,) + (1,) * (batch[k].ndim - 1)), batch[k], v)
-            for k, v in carry.current_data.items()
-        }
-
-        # Forward inner model
-        new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(
-            new_inner_carry, new_current_data
-        )
-
-        outputs = {"logits": logits, "q_halt_logits": q_halt_logits, "q_continue_logits": q_continue_logits}
-
-        with torch.no_grad():
-            # Step
-            new_steps = new_steps + 1
-            max_steps = self.config.halt_max_steps if self.training or self.config.halt_max_steps_eval is None else self.config.halt_max_steps_eval
-            is_last_step = new_steps >= max_steps
-
-            halted = is_last_step
-            outputs["is_last_step"] = is_last_step
-
-            # Check if adaptive computation should be used
-            use_adaptive = (self.config.halt_max_steps > 1) and (
-                (self.training and self.config.act_enabled)
-                or (not self.training and self.config.act_inference)
-            )
-
-            halt_threshold = self.config.halt_train_threshold if self.training else self.config.halt_eval_threshold
-            q_halt_prob = torch.sigmoid(q_halt_logits)
-
-            if (self.config.halt_on_correct_and_predicted or self.config.halt_on_correct) and self.training:
-                preds = logits.argmax(-1)
-                labels = new_current_data["labels"]
-                correct = ((preds == labels) | (labels == IGNORE_LABEL_ID)).all(dim=-1)
-                if self.config.halt_on_correct_and_predicted:
-                    halted = halted | (correct & (q_halt_prob >= halt_threshold))
-                else:
-                    halted = halted | correct
-            elif use_adaptive:
-                # Halt signal based on Q-values (but always halt at max steps)
-                q_halt_signal = q_halt_logits > q_continue_logits
-                halted = halted | q_halt_signal
-
-                # Store actual steps used for logging (only during inference)
-                if not self.training:
-                    outputs["actual_steps"] = new_steps.float()
-
-                # Exploration (only during training)
-                if self.training:
-                    min_halt_steps = (
-                        torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob
-                    ) * torch.randint_like(new_steps, low=2, high=self.config.halt_max_steps + 1)
-                    halted = halted & (new_steps >= min_halt_steps)
-
-                # Compute target Q (only during training)
-                # NOTE: No replay buffer and target networks for computing target Q-value.
-                # As batch_size is large, there're many parallel envs.
-                # Similar concept as PQN https://arxiv.org/abs/2407.04811
-                if self.training and compute_target_q:
-                    next_q_halt_logits, next_q_continue_logits = self.inner(
-                        new_inner_carry, new_current_data
-                    )[-1]
-
-                    outputs["target_q_continue"] = torch.sigmoid(
-                        torch.where(
-                            is_last_step,
-                            next_q_halt_logits,
-                            torch.maximum(next_q_halt_logits, next_q_continue_logits),
-                        )
-                    )
-
-        return Model_ACTV2Carry(
-            new_inner_carry, new_steps, halted, new_current_data
-        ), outputs
+def Model_ACTV2(config_dict: dict):
+    """Factory: creates ACTWrapper around the inner model."""
+    from models.act import ACTWrapper
+    config = Model_ACTV2Config(**config_dict)
+    inner = Model_ACTV2_Inner(config)
+    return ACTWrapper(inner, config)

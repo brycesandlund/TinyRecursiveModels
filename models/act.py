@@ -1,0 +1,149 @@
+"""
+Shared ACT (Adaptive Computation Time) outer loop for all recursive reasoning models.
+
+All models share the same carry management, halting logic, and data recycling.
+The inner model just needs to implement:
+  - empty_carry(batch_size) -> inner_carry
+  - reset_carry(mask, inner_carry) -> inner_carry
+  - forward(inner_carry, data) -> (inner_carry, logits, (q_halt_logits, q_continue_logits))
+"""
+
+from typing import Tuple, Dict, Any
+from dataclasses import dataclass
+
+import torch
+from torch import nn
+
+IGNORE_LABEL_ID = -100
+
+
+@dataclass
+class ACTCarry:
+    inner_carry: Any
+    steps: torch.Tensor       # [batch_size] int32
+    halted: torch.Tensor      # [batch_size] bool
+    current_data: Dict[str, torch.Tensor]
+
+
+class ACTWrapper(nn.Module):
+    """Shared ACT wrapper for all recursive reasoning models."""
+
+    def __init__(self, inner_model: nn.Module, config):
+        super().__init__()
+        self.inner = inner_model
+        self.config = config
+
+    @property
+    def puzzle_emb(self):
+        return self.inner.puzzle_emb
+
+    def initial_carry(self, batch_size: int, sample_template: Dict[str, torch.Tensor]) -> ACTCarry:
+        return ACTCarry(
+            inner_carry=self.inner.empty_carry(batch_size),
+            steps=torch.zeros((batch_size,), dtype=torch.int32),
+            halted=torch.ones((batch_size,), dtype=torch.bool),
+            current_data={
+                k: v.unsqueeze(0).expand(batch_size, *v.shape).clone()
+                for k, v in sample_template.items()
+            },
+        )
+
+    def forward(
+        self,
+        carry: ACTCarry,
+        batch: Dict[str, torch.Tensor],
+    ) -> Tuple[ACTCarry, Dict[str, torch.Tensor]]:
+        # Reset carry for halted positions
+        new_inner_carry = self.inner.reset_carry(carry.halted, carry.inner_carry)
+        new_steps = torch.where(carry.halted, 0, carry.steps)
+        new_current_data = {
+            k: torch.where(
+                carry.halted.view((-1,) + (1,) * (batch[k].ndim - 1)),
+                batch[k], v
+            )
+            for k, v in carry.current_data.items()
+        }
+
+        # Forward inner model
+        new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(
+            new_inner_carry, new_current_data
+        )
+
+        outputs = {
+            "logits": logits,
+            "q_halt_logits": q_halt_logits,
+            "q_continue_logits": q_continue_logits,
+        }
+
+        with torch.no_grad():
+            # Step counting
+            new_steps = new_steps + 1
+            halt_max_steps = self.config.halt_max_steps
+            if not self.training and self.config.halt_max_steps_eval is not None:
+                halt_max_steps = self.config.halt_max_steps_eval
+            is_last_step = new_steps >= halt_max_steps
+
+            halted = is_last_step
+            outputs["is_last_step"] = is_last_step
+
+            # Check if adaptive computation should be used
+            act_enabled = self.config.act_enabled
+            act_inference = self.config.act_inference
+            eval_on_q = self.config.eval_on_q
+            no_ACT_continue = self.config.no_ACT_continue
+
+            use_adaptive = (self.config.halt_max_steps > 1) and (
+                (self.training and act_enabled)
+                or (not self.training and (act_inference or eval_on_q))
+            )
+
+            if use_adaptive:
+                halt_threshold = (
+                    self.config.halt_train_threshold if self.training
+                    else self.config.halt_eval_threshold
+                )
+                q_halt_prob = torch.sigmoid(q_halt_logits)
+
+                # Halt signal
+                halt_on_correct = self.config.halt_on_correct
+                halt_on_correct_and_predicted = self.config.halt_on_correct_and_predicted
+
+                if (halt_on_correct_and_predicted or halt_on_correct) and self.training:
+                    preds = logits.argmax(-1)
+                    labels = new_current_data["labels"]
+                    correct = ((preds == labels) | (labels == IGNORE_LABEL_ID)).all(dim=-1)
+                    if halt_on_correct_and_predicted:
+                        halted = halted | (correct & (q_halt_prob >= halt_threshold))
+                    else:
+                        halted = halted | correct
+                elif no_ACT_continue:
+                    halted = halted | (q_halt_prob >= halt_threshold)
+                else:
+                    q_halt_signal = q_halt_logits > q_continue_logits
+                    halted = halted | q_halt_signal
+
+                # Store actual steps used for logging (only during inference)
+                if not self.training:
+                    outputs["actual_steps"] = new_steps.float()
+
+                # Exploration (training only)
+                if self.training:
+                    min_halt_steps = (
+                        torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob
+                    ) * torch.randint_like(new_steps, low=2, high=self.config.halt_max_steps + 1)
+                    halted = halted & (new_steps >= min_halt_steps)
+
+                # Compute target Q (training only, when using Q-continue)
+                if self.training and not no_ACT_continue:
+                    next_q_halt_logits, next_q_continue_logits = self.inner(
+                        new_inner_carry, new_current_data
+                    )[-1]
+                    outputs["target_q_continue"] = torch.sigmoid(
+                        torch.where(
+                            is_last_step,
+                            next_q_halt_logits,
+                            torch.maximum(next_q_halt_logits, next_q_continue_logits),
+                        )
+                    )
+
+        return ACTCarry(new_inner_carry, new_steps, halted, new_current_data), outputs

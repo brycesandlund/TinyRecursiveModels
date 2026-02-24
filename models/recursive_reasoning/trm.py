@@ -19,14 +19,6 @@ class TinyRecursiveReasoningModel_ACTV1InnerCarry:
     z_L: torch.Tensor
 
 
-@dataclass
-class TinyRecursiveReasoningModel_ACTV1Carry:
-    inner_carry: TinyRecursiveReasoningModel_ACTV1InnerCarry
-    
-    steps: torch.Tensor
-    halted: torch.Tensor
-    
-    current_data: Dict[str, torch.Tensor]
 
 
 class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
@@ -55,6 +47,8 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     halt_max_steps: int
     halt_max_steps_eval: Optional[int] = None  # If set, use this for eval instead of halt_max_steps
     halt_exploration_prob: float
+    act_enabled: bool = True # If False, always run halt_max_steps (no early stopping during training)
+    act_inference: bool = False # If True, use adaptive computation during inference
 
     forward_dtype: str = "bfloat16"
 
@@ -208,7 +202,6 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
 
         # Forward iterations
-        it = 0
         z_H, z_L = carry.z_H, carry.z_L
         # H_cycles-1 without grad
         with torch.no_grad():
@@ -228,87 +221,9 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
 
 
-class TinyRecursiveReasoningModel_ACTV1(nn.Module):
-    """ACT wrapper."""
-
-    def __init__(self, config_dict: dict):
-        super().__init__()
-        self.config = TinyRecursiveReasoningModel_ACTV1Config(**config_dict)
-        self.inner = TinyRecursiveReasoningModel_ACTV1_Inner(self.config)
-
-    @property
-    def puzzle_emb(self):
-        return self.inner.puzzle_emb
-
-    def initial_carry(self, batch: Dict[str, torch.Tensor]):
-        batch_size = batch["inputs"].shape[0]
-
-        return TinyRecursiveReasoningModel_ACTV1Carry(
-            inner_carry=self.inner.empty_carry(batch_size),  # Empty is expected, it will be reseted in first pass as all sequences are halted.
-            
-            steps=torch.zeros((batch_size, ), dtype=torch.int32),
-            halted=torch.ones((batch_size, ), dtype=torch.bool),  # Default to halted
-            
-            current_data={k: torch.empty_like(v) for k, v in batch.items()}
-        )
-        
-    def forward(self, carry: TinyRecursiveReasoningModel_ACTV1Carry, batch: Dict[str, torch.Tensor]) -> Tuple[TinyRecursiveReasoningModel_ACTV1Carry, Dict[str, torch.Tensor]]:
-
-        # Update data, carry (removing halted sequences)
-        new_inner_carry = self.inner.reset_carry(carry.halted, carry.inner_carry)
-        
-        new_steps = torch.where(carry.halted, 0, carry.steps)
-
-        new_current_data = {k: torch.where(carry.halted.view((-1, ) + (1, ) * (batch[k].ndim - 1)), batch[k], v) for k, v in carry.current_data.items()}
-
-        # Forward inner model
-        new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(new_inner_carry, new_current_data)
-
-        outputs = {
-            "logits": logits,
-            "q_halt_logits": q_halt_logits,
-            "q_continue_logits": q_continue_logits
-        }
-
-        with torch.no_grad():
-            # Step
-            new_steps = new_steps + 1
-            max_steps = self.config.halt_max_steps if self.training or self.config.halt_max_steps_eval is None else self.config.halt_max_steps_eval
-            is_last_step = new_steps >= max_steps
-
-            halted = is_last_step
-            outputs["is_last_step"] = is_last_step
-
-            # if training, and ACT is enabled
-            if (self.training or self.config.eval_on_q) and (self.config.halt_max_steps > 1):
-                halt_threshold = self.config.halt_train_threshold if self.training else self.config.halt_eval_threshold
-                q_halt_prob = torch.sigmoid(q_halt_logits)
-
-                # Halt signal
-                if (self.config.halt_on_correct_and_predicted or self.config.halt_on_correct) and self.training:
-                    preds = logits.argmax(-1)
-                    labels = new_current_data["labels"]
-                    correct = ((preds == labels) | (labels == IGNORE_LABEL_ID)).all(dim=-1)
-                    if self.config.halt_on_correct_and_predicted:
-                        halted = halted | (correct & (q_halt_prob >= halt_threshold))
-                    else:
-                        halted = halted | correct
-                elif self.config.no_ACT_continue:
-                    halted = halted | (q_halt_prob >= halt_threshold)
-                else:
-                    halted = halted | (q_halt_logits > q_continue_logits)
-
-                # Exploration (training only)
-                if self.training:
-                    min_halt_steps = (torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob) * torch.randint_like(new_steps, low=2, high=self.config.halt_max_steps + 1)
-                    halted = halted & (new_steps >= min_halt_steps)
-
-                if not self.config.no_ACT_continue:
-                    # Compute target Q
-                    # NOTE: No replay buffer and target networks for computing target Q-value.
-                    # As batch_size is large, there're many parallel envs.
-                    # Similar concept as PQN https://arxiv.org/abs/2407.04811
-                    _, _, (next_q_halt_logits, next_q_continue_logits), _, _ = self.inner(new_inner_carry, new_current_data)
-                    outputs["target_q_continue"] = torch.sigmoid(torch.where(is_last_step, next_q_halt_logits, torch.maximum(next_q_halt_logits, next_q_continue_logits)))
-
-        return TinyRecursiveReasoningModel_ACTV1Carry(new_inner_carry, new_steps, halted, new_current_data), outputs
+def TinyRecursiveReasoningModel_ACTV1(config_dict: dict):
+    """Factory: creates ACTWrapper around the inner model."""
+    from models.act import ACTWrapper
+    config = TinyRecursiveReasoningModel_ACTV1Config(**config_dict)
+    inner = TinyRecursiveReasoningModel_ACTV1_Inner(config)
+    return ACTWrapper(inner, config)
