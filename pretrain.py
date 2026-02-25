@@ -487,18 +487,41 @@ def _train_step(config, train_state, batch, effective_gbs, rank, world_size):
 
         if rank == 0:
             metric_values = metric_values.cpu().numpy()
-            reduced_metrics = {k: metric_values[i] for i, k in enumerate(metric_keys)}
+            raw_metrics = {k: metric_values[i] for i, k in enumerate(metric_keys)}
 
-            no_halted = reduced_metrics["count"] == 0
-            original_count = reduced_metrics["count"]
-            count = max(reduced_metrics["count"], 1)
-            reduced_metrics = {
-                f"train/{k}": v / (effective_gbs if k.endswith("loss") else count)
-                for k, v in reduced_metrics.items()
-            }
+            no_halted = raw_metrics["count"] == 0
+            original_count = raw_metrics["count"]
+            count = max(raw_metrics["count"], 1)
+            explore_count = max(raw_metrics.get("explore_count", 0), 1)
+            standard_count = max(raw_metrics.get("standard_count", 0), 1)
+
+            reduced_metrics = {}
+            for k, v in raw_metrics.items():
+                if k.endswith("loss"):
+                    denom = effective_gbs
+                elif k.startswith("explore_") and k != "explore_count":
+                    denom = explore_count
+                elif k.startswith("standard_") and k != "standard_count":
+                    denom = standard_count
+                else:
+                    denom = count
+
+                reduced_metrics[f"train/{k}"] = v / denom
             if no_halted:
                 for k in ["train/steps", "train/q_halt_accuracy", "train/q_halt_false_positive",
                            "train/hit_max_steps", "train/accuracy", "train/exact_accuracy"]:
+                    reduced_metrics.pop(k, None)
+            if raw_metrics.get("explore_count", 0) == 0:
+                for k in [
+                    "train/explore_steps", "train/explore_q_halt_accuracy", "train/explore_q_halt_false_positive",
+                    "train/explore_hit_max_steps", "train/explore_accuracy", "train/explore_exact_accuracy"
+                ]:
+                    reduced_metrics.pop(k, None)
+            if raw_metrics.get("standard_count", 0) == 0:
+                for k in [
+                    "train/standard_steps", "train/standard_q_halt_accuracy", "train/standard_q_halt_false_positive",
+                    "train/standard_hit_max_steps", "train/standard_accuracy", "train/standard_exact_accuracy"
+                ]:
                     reduced_metrics.pop(k, None)
 
             reduced_metrics["train/count"] = original_count

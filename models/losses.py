@@ -74,17 +74,29 @@ class ACTLossHead(nn.Module):
             
             # Metrics (halted)
             valid_metrics = new_carry.halted & (loss_counts > 0)
-            metrics = {
-                "count": valid_metrics.sum(),
-                
-                "accuracy":       torch.where(valid_metrics, (is_correct.to(torch.float32) / loss_divisor).sum(-1), 0).sum(),
-                "exact_accuracy": (valid_metrics & seq_is_correct).sum(),
+            explore_metrics = valid_metrics & new_carry.use_eval_halting
+            standard_metrics = valid_metrics & ~new_carry.use_eval_halting
+            metrics: Dict[str, torch.Tensor] = {}
 
-                "q_halt_accuracy": (valid_metrics & ((outputs["q_halt_logits"] >= 0) == seq_is_correct)).sum(),
-                "q_halt_false_positive": (valid_metrics & (outputs["q_halt_logits"] >= 0) & ~seq_is_correct).sum(),
-                "steps":          torch.where(valid_metrics, new_carry.steps, 0).sum(),
-                "hit_max_steps":  (valid_metrics & outputs["is_last_step"]).sum(),
-            }
+            def add_group_metrics(prefix: str, group_mask: torch.Tensor):
+                key_prefix = f"{prefix}_" if prefix else ""
+                metrics[f"{key_prefix}count"] = group_mask.sum()
+                metrics[f"{key_prefix}accuracy"] = torch.where(
+                    group_mask, (is_correct.to(torch.float32) / loss_divisor).sum(-1), 0
+                ).sum()
+                metrics[f"{key_prefix}exact_accuracy"] = (group_mask & seq_is_correct).sum()
+                metrics[f"{key_prefix}q_halt_accuracy"] = (
+                    group_mask & ((outputs["q_halt_logits"] >= 0) == seq_is_correct)
+                ).sum()
+                metrics[f"{key_prefix}q_halt_false_positive"] = (
+                    group_mask & (outputs["q_halt_logits"] >= 0) & ~seq_is_correct
+                ).sum()
+                metrics[f"{key_prefix}steps"] = torch.where(group_mask, new_carry.steps, 0).sum()
+                metrics[f"{key_prefix}hit_max_steps"] = (group_mask & outputs["is_last_step"]).sum()
+
+            add_group_metrics("", valid_metrics)
+            add_group_metrics("explore", explore_metrics)
+            add_group_metrics("standard", standard_metrics)
 
         # Losses
 
@@ -105,4 +117,3 @@ class ACTLossHead(nn.Module):
         detached_outputs = {k: outputs[k].detach() for k in return_keys if k in outputs}
 
         return new_carry, lm_loss + 0.5 * (q_halt_loss + q_continue_loss), metrics, detached_outputs, new_carry.halted.all()
-
