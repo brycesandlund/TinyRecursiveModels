@@ -71,6 +71,8 @@ class Model_ACTV2Config(BaseModel):
     explore_as_eval: bool = False # If True, explored samples use eval halting strategy
     no_ACT_continue: bool = True # No continue ACT loss, only use the sigmoid of the halt
 
+    gradient_checkpointing: bool = False  # If True, checkpoint each H_cycle to save memory
+
     forward_dtype: str = "bfloat16"
 
 
@@ -241,7 +243,13 @@ class Model_ACTV2_Inner(nn.Module):
                     for _ in range(n_no_grad):
                         z_H = self.H_level(z_H, input_embeddings, **seq_info)
         for _ in range(self.config.H_cycles):
-            z_H = self.H_level(z_H, input_embeddings, **seq_info)
+            if self.training and self.config.gradient_checkpointing:
+                z_H = torch.utils.checkpoint.checkpoint(
+                    self.H_level, z_H, input_embeddings,
+                    use_reentrant=False, **seq_info
+                )
+            else:
+                z_H = self.H_level(z_H, input_embeddings, **seq_info)
 
         # LM Outputs
         new_carry = Model_ACTV2InnerCarry(
