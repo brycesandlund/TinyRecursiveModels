@@ -116,23 +116,58 @@ IGNORE_LABEL_ID = -100
 class SampleQueue:
     """Flattens batches into a queue of individual samples.
 
-    Eagerly materializes all samples. Pops n samples at a time,
-    collated into a batch and moved to the target device.
+    Accepts either a list (eager, for eval) or an iterator/generator
+    (lazy, for training). In lazy mode, only `_buffer_chunks` dataloader
+    batches are kept in memory at a time.
+
+    Pops n samples at a time, collated into a batch and moved to the
+    target device.
     """
 
-    def __init__(self, batches: List[Dict[str, torch.Tensor]], device):
+    def __init__(self, batches, device, _buffer_chunks: int = 32):
         self.device = device
         self._samples = []  # List of {key: tensor[seq_len]} per sample
+        self._cursor = 0
+        self._total_loaded = 0
 
-        for batch in batches:
+        if isinstance(batches, list):
+            # Eager mode: flatten all samples immediately
+            self._iter = None
+            for batch in batches:
+                bs = batch["inputs"].shape[0]
+                for i in range(bs):
+                    self._samples.append({k: v[i] for k, v in batch.items()})
+            self._total_loaded = len(self._samples)
+        else:
+            # Lazy mode: buffer from iterator on demand
+            self._iter = iter(batches)
+            self._buffer_chunks = _buffer_chunks
+            self._refill()
+
+    def _refill(self):
+        """Load the next chunk of batches from the iterator into the buffer."""
+        if self._iter is None:
+            return
+        # Compact: drop already-consumed samples
+        if self._cursor > 0:
+            self._samples = self._samples[self._cursor:]
+            self._cursor = 0
+        for _ in range(self._buffer_chunks):
+            try:
+                batch = next(self._iter)
+            except StopIteration:
+                self._iter = None
+                break
             bs = batch["inputs"].shape[0]
             for i in range(bs):
                 self._samples.append({k: v[i] for k, v in batch.items()})
-
-        self._cursor = 0
+                self._total_loaded += 1
 
     def pop(self, n: int) -> Dict[str, torch.Tensor]:
         """Pop n samples, return as a collated batch on device."""
+        # Refill if buffer doesn't have enough and iterator isn't exhausted
+        if self._iter is not None and (len(self._samples) - self._cursor) < n:
+            self._refill()
         n = min(n, self.remaining())
         assert n > 0, "Cannot pop from empty queue"
 
@@ -144,6 +179,8 @@ class SampleQueue:
         return batch
 
     def remaining(self) -> int:
+        if self._iter is not None and self._cursor >= len(self._samples):
+            self._refill()
         return len(self._samples) - self._cursor
 
     def peek(self) -> Dict[str, torch.Tensor]:
@@ -152,10 +189,12 @@ class SampleQueue:
         return {k: v.to(self.device) for k, v in self._samples[self._cursor].items()}
 
     def empty(self) -> bool:
+        if self._iter is not None and self._cursor >= len(self._samples):
+            self._refill()
         return self._cursor >= len(self._samples)
 
     def total(self) -> int:
-        return len(self._samples)
+        return self._total_loaded
 
 
 def build_replacement_batch(
@@ -472,7 +511,7 @@ def _train_step(config, train_state, batch, effective_gbs, rank, world_size):
 def train_epoch(config, train_state, train_loader, rank, world_size, ema_helper, progress_bar):
     """Queue-based training epoch. Consumes all samples from the dataloader exactly once."""
     local_bs = config.global_batch_size // world_size
-    queue = SampleQueue([batch for _, batch, _ in train_loader], device=DEVICE)
+    queue = SampleQueue((batch for _, batch, _ in train_loader), device=DEVICE)
 
     if rank == 0:
         print(f"  Queue loaded: {queue.total()} samples")
