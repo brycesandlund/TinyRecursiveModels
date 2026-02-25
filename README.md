@@ -49,6 +49,8 @@ The following configurations have been added since forking the original repo. Th
 | `arch.act_inference` | `False` | If `True`, use adaptive computation during inference. |
 | `arch.no_ACT_continue` | `True` | No continue ACT loss — only use the sigmoid of the halt signal. |
 | `arch.explore_as_eval` | `False` | If `True`, explored samples (epsilon fraction) use the eval halting strategy during training instead of random min-step exploration. |
+| `arch.grad_cycle_prob` | `1.0` | Probability that a cycle is a grad cycle. If <1.0, prepends random no_grad cycles sampled from a negative binomial distribution. |
+| `arch.gradient_checkpointing` | `False` | If `True`, checkpoint each H_cycle to save memory by recomputing intermediates during backward. Only applies to `transformers_baseline`. |
 
 ### Dataset Preparation
 
