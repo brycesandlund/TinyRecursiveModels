@@ -90,6 +90,7 @@ class PretrainConfig(pydantic.BaseModel):
     seed: int = 0
     checkpoint_every_eval: bool = False
     eval_interval: Optional[int] = None
+    eval_step_interval: Optional[int] = None  # evaluate every N training steps within an epoch
     min_eval_interval: Optional[int] = 0 # when to start eval
     eval_save_outputs: List[str] = []
     max_eval_groups: Optional[int] = None  # Limit eval groups for dev testing
@@ -508,7 +509,8 @@ def _train_step(config, train_state, batch, effective_gbs, rank, world_size):
     return None
 
 
-def train_epoch(config, train_state, train_loader, rank, world_size, ema_helper, progress_bar):
+def train_epoch(config, train_state, train_loader, rank, world_size, ema_helper, progress_bar,
+                eval_loader=None, eval_metadata=None, evaluators=None, cpu_group=None):
     """Queue-based training epoch. Consumes all samples from the dataloader exactly once."""
     local_bs = config.global_batch_size // world_size
     queue = SampleQueue((batch for _, batch, _ in train_loader), device=DEVICE)
@@ -533,6 +535,14 @@ def train_epoch(config, train_state, train_loader, rank, world_size, ema_helper,
 
         if config.ema:
             ema_helper.update(train_state.model)
+
+        if (config.eval_step_interval is not None
+                and train_state.step % config.eval_step_interval == 0
+                and eval_loader is not None):
+            _run_eval(config, train_state, eval_loader, eval_metadata, evaluators,
+                      ema_helper, is_last=False, rank=rank, world_size=world_size,
+                      cpu_group=cpu_group)
+            train_state.model.train()
 
         if train_state.step > train_state.total_steps:
             break
@@ -841,7 +851,9 @@ def launch(hydra_config: DictConfig):
             print("TRAIN")
         train_state.model.train()
         train_epoch(config, train_state, train_loader, rank=RANK, world_size=WORLD_SIZE,
-                    ema_helper=ema_helper, progress_bar=progress_bar)
+                    ema_helper=ema_helper, progress_bar=progress_bar,
+                    eval_loader=eval_loader, eval_metadata=eval_metadata,
+                    evaluators=evaluators, cpu_group=CPU_PROCESS_GROUP)
 
         if _iter_id >= config.min_eval_interval:
             ############ Evaluation
