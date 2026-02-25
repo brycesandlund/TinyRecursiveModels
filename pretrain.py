@@ -525,6 +525,10 @@ def _train_step(config, train_state, batch, effective_gbs, rank, world_size):
                     reduced_metrics.pop(k, None)
 
             reduced_metrics["train/count"] = original_count
+            if "explore_count" in raw_metrics:
+                reduced_metrics["train/explore_count"] = raw_metrics["explore_count"]
+            if "standard_count" in raw_metrics:
+                reduced_metrics["train/standard_count"] = raw_metrics["standard_count"]
             train_state.cumulative_count += int(original_count)
             reduced_metrics["train/cumulative_count"] = train_state.cumulative_count
             reduced_metrics["train/lr"] = lr_this_step
